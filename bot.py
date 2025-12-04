@@ -11,21 +11,49 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 sessions = {}
 
 
-# ------------------- AUTO FIX USER CODE -------------------
+# ------------------- FIX MULTI-LINE INPUT STRINGS -------------------
+def fix_multiline_input_strings(code):
+    """
+    Converts actual newline characters inside input("...") strings
+    back into \\n so Python does not break the string.
+    """
+    new_code = ""
+    inside_string = False
+    string_char = ""
+
+    for ch in code:
+        # Detect if entering or exiting a string
+        if ch in ['"', "'"]:
+            if not inside_string:
+                inside_string = True
+                string_char = ch
+            elif inside_string and ch == string_char:
+                inside_string = False
+
+        # Replace real newline inside strings with \n
+        if inside_string and ch == "\n":
+            new_code += "\\n"
+        else:
+            new_code += ch
+
+    return new_code
+
+
+# ------------------- FIX BADLY FORMATTED ONE-LINE CODE -------------------
 def fix_code_formatting(code):
-    # Split at ") " → new line
+    # Add new line after ) 
     code = code.replace(") ", ")\n")
 
-    # Split at ": " (function, input prompt, etc.)
+    # Add newline after colon patterns
     code = code.replace(": ", ":\n")
 
-    # Split at semicolon
+    # Convert semicolons to newlines
     code = code.replace(";", "\n")
 
-    # Ensure print/input start on new line
+    # Ensure print/input begin on new line
     code = re.sub(r'\)\s*(print|input)', r')\n\1', code)
 
-    # Clean multiple spaces/newlines
+    # Clean extra spaces & blank lines
     lines = [l.strip() for l in code.split("\n") if l.strip()]
     return "\n".join(lines)
 
@@ -35,9 +63,10 @@ def extract_prompts(code):
     return re.findall(r'input\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', code)
 
 
-# ------------------- EXECUTE PYTHON CODE -------------------
+# ------------------- RUN PYTHON CODE -------------------
 def run_python(code, inputs):
     temp = f"temp_{uuid.uuid4().hex[:8]}.py"
+
     with open(temp, "w") as f:
         f.write(code)
 
@@ -49,23 +78,28 @@ def run_python(code, inputs):
             input=input_data,
             text=True,
             capture_output=True,
-            timeout=25
+            timeout=30
         )
         output = result.stdout + result.stderr
+
     except subprocess.TimeoutExpired:
-        output = "❌ Execution took too long."
+        output = "❌ Execution timed out."
 
     os.remove(temp)
     return output if output.strip() else "No output."
 
 
-# ------------------- /start -------------------
+# ------------------- /start COMMAND -------------------
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "👋 Welcome to **Code Runner Bot**!\n"
-        "Send me Python code and I will run it.\n"
-        "Supports *input()* with correct prompts.\n\n"
-        "Paste your Python script ANY way — I will fix formatting automatically."
+        "👋 Welcome to **Code Runner Bot!**\n"
+        "Send me **Python code** and I will run it.\n"
+        "Supports:\n"
+        "• `input()` prompts\n"
+        "• Multi-line input text\n"
+        "• One-line pasted code auto-fixing\n"
+        "• Complex loops, conditions, match-case etc.\n\n"
+        "Just send code directly."
     )
 
 
@@ -74,34 +108,35 @@ def handle_message(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     text = update.message.text
 
-    # --- STEP 1: USER IS GIVING INPUTS ---
+    # ---------- USER IS PROVIDING INPUTS ----------
     if chat_id in sessions and sessions[chat_id]["awaiting"]:
         sessions[chat_id]["inputs"].append(text)
 
-        # All inputs received
         if len(sessions[chat_id]["inputs"]) == sessions[chat_id]["need"]:
             code = sessions[chat_id]["code"]
             output = run_python(code, sessions[chat_id]["inputs"])
             update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
             sessions.pop(chat_id)
         else:
-            # Ask next prompt
             next_prompt = sessions[chat_id]["prompts"][len(sessions[chat_id]["inputs"])]
             update.message.reply_text(next_prompt)
         return
 
-    # --- STEP 2: NEW PYTHON CODE RECEIVED ---
+    # ---------- NEW PYTHON CODE RECEIVED ----------
+    # Fix formatting and broken multi-line strings
     code = fix_code_formatting(text)
+    code = fix_multiline_input_strings(code)
+
     prompts = extract_prompts(code)
     need = len(prompts)
 
-    # No input() in code → run directly
+    # If no input() calls → run immediately
     if need == 0:
         output = run_python(code, [])
         update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
         return
 
-    # Store code session
+    # Save session for multiple inputs
     sessions[chat_id] = {
         "code": code,
         "inputs": [],
@@ -110,7 +145,7 @@ def handle_message(update: Update, context: CallbackContext):
         "awaiting": True
     }
 
-    # Ask first input prompt
+    # Send first prompt
     update.message.reply_text(prompts[0])
 
 
