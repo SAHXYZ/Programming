@@ -7,108 +7,151 @@ from telegram.ext import Updater, MessageHandler, Filters, CommandHandler, Callb
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Store user sessions
+# User sessions for storing inputs
 sessions = {}
 
 
-# ------------------- FIX MULTI-LINE INPUT STRINGS -------------------
+# --------------------- FIX MULTI-LINE STRINGS ---------------------
 def fix_multiline_input_strings(code):
     """
-    Converts actual newline characters inside input("...") strings
-    back into \\n so Python does not break the string.
+    Converts actual newlines inside quotes into \n so Python does not break strings.
     """
     new_code = ""
-    inside_string = False
-    string_char = ""
+    inside = False
+    quote = ""
 
     for ch in code:
-        # Detect if entering or exiting a string
         if ch in ['"', "'"]:
-            if not inside_string:
-                inside_string = True
-                string_char = ch
-            elif inside_string and ch == string_char:
-                inside_string = False
+            if not inside:
+                inside = True
+                quote = ch
+            elif inside and ch == quote:
+                inside = False
 
-        # Replace real newline inside strings with \n
-        if inside_string and ch == "\n":
-            new_code += "\\n"
+        if inside and ch == "\n":
+            new_code += "\\n"   # convert real newline to \n
         else:
             new_code += ch
 
     return new_code
 
 
-# ------------------- FIX BADLY FORMATTED ONE-LINE CODE -------------------
+# --------------------- CLEAN BAD FORMATTING ---------------------
 def fix_code_formatting(code):
-    # Add new line after ) 
     code = code.replace(") ", ")\n")
-
-    # Add newline after colon patterns
     code = code.replace(": ", ":\n")
-
-    # Convert semicolons to newlines
     code = code.replace(";", "\n")
-
-    # Ensure print/input begin on new line
     code = re.sub(r'\)\s*(print|input)', r')\n\1', code)
 
-    # Clean extra spaces & blank lines
-    lines = [l.strip() for l in code.split("\n") if l.strip()]
-    return "\n".join(lines)
+    lines = [l.strip() for l in code.split("\n")]
+    return "\n".join([l for l in lines if l])
 
 
-# ------------------- EXTRACT INPUT PROMPTS -------------------
+# --------------------- AUTO INDENT RECONSTRUCTION ---------------------
+def auto_indent(code):
+    """
+    Rebuild indentation for one-line code.
+    Supports if, elif, else, for, while, match, case, def, class, try, except, finally.
+    """
+    keywords = {
+        "if", "elif", "else", "for", "while",
+        "match", "case", "def", "class",
+        "try", "except", "finally"
+    }
+
+    # Split by keywords (while preserving them)
+    tokens = re.split(r'\b(if|elif|else|for|while|match|case|def|class|try|except|finally)\b', code)
+    result = ""
+    indent = 0
+    i = 0
+
+    while i < len(tokens):
+        part = tokens[i]
+
+        if part in keywords:
+            kw = part
+            rest = tokens[i + 1] if i + 1 < len(tokens) else ""
+            line = kw + rest
+
+            result += ("    " * indent) + line.strip() + "\n"
+
+            if ":" in line:
+                indent += 1
+
+            i += 2
+        else:
+            lines = part.split("\n")
+            for ln in lines:
+                if ln.strip():
+                    result += ("    " * indent) + ln.strip() + "\n"
+            i += 1
+
+    return result
+
+
+# --------------------- EXTRACT CLEAN PROMPTS ---------------------
 def extract_prompts(code):
-    return re.findall(r'input\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', code)
+    raw = re.findall(r'input\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', code)
+
+    clean = []
+    for p in raw:
+        # Convert escaped \n into real newline
+        p = p.replace("\\n", "\n")
+
+        # Remove ALL newlines for Telegram prompt
+        p = p.replace("\n", " ")
+
+        clean.append(p.strip())
+
+    return clean
 
 
-# ------------------- RUN PYTHON CODE -------------------
+# --------------------- RUN PYTHON ---------------------
 def run_python(code, inputs):
     temp = f"temp_{uuid.uuid4().hex[:8]}.py"
 
     with open(temp, "w") as f:
         f.write(code)
 
-    input_data = "\n".join(inputs) + "\n"
+    input_text = "\n".join(inputs) + "\n"
 
     try:
         result = subprocess.run(
             ["python3", temp],
-            input=input_data,
+            input=input_text,
             text=True,
             capture_output=True,
-            timeout=30
+            timeout=25
         )
         output = result.stdout + result.stderr
-
     except subprocess.TimeoutExpired:
-        output = "❌ Execution timed out."
+        output = "❌ Execution Timeout"
 
     os.remove(temp)
     return output if output.strip() else "No output."
 
 
-# ------------------- /start COMMAND -------------------
+# --------------------- /start COMMAND ---------------------
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "👋 Welcome to **Code Runner Bot!**\n"
-        "Send me **Python code** and I will run it.\n"
+        "👋 Welcome to **ProgramBOT – Python Code Runner**!\n\n"
+        "Send your Python code and I will execute it.\n\n"
         "Supports:\n"
-        "• `input()` prompts\n"
-        "• Multi-line input text\n"
-        "• One-line pasted code auto-fixing\n"
-        "• Complex loops, conditions, match-case etc.\n\n"
-        "Just send code directly."
+        "✔ input() prompts\n"
+        "✔ auto-indent fixing\n"
+        "✔ multi-line input strings\n"
+        "✔ complex programs (loops, match-case)\n"
+        "✔ one-line messy code\n\n"
+        "Send your code now."
     )
 
 
-# ------------------- MESSAGE HANDLER -------------------
+# --------------------- HANDLE EVERY MESSAGE ---------------------
 def handle_message(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     text = update.message.text
 
-    # ---------- USER IS PROVIDING INPUTS ----------
+    # ------- If user is giving input() values -------
     if chat_id in sessions and sessions[chat_id]["awaiting"]:
         sessions[chat_id]["inputs"].append(text)
 
@@ -122,21 +165,23 @@ def handle_message(update: Update, context: CallbackContext):
             update.message.reply_text(next_prompt)
         return
 
-    # ---------- NEW PYTHON CODE RECEIVED ----------
-    # Fix formatting and broken multi-line strings
-    code = fix_code_formatting(text)
+    # ------- New code received -------
+    code = text
+
+    # Formatting pipeline
     code = fix_multiline_input_strings(code)
+    code = fix_code_formatting(code)
+    code = auto_indent(code)
 
     prompts = extract_prompts(code)
     need = len(prompts)
 
-    # If no input() calls → run immediately
     if need == 0:
         output = run_python(code, [])
         update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
         return
 
-    # Save session for multiple inputs
+    # Save session
     sessions[chat_id] = {
         "code": code,
         "inputs": [],
@@ -145,11 +190,10 @@ def handle_message(update: Update, context: CallbackContext):
         "awaiting": True
     }
 
-    # Send first prompt
     update.message.reply_text(prompts[0])
 
 
-# ------------------- MAIN -------------------
+# --------------------- MAIN ---------------------
 def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
