@@ -10,10 +10,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # Store user sessions
 sessions = {}
 
-
-def count_inputs(code):
-    return len(re.findall(r"input\s*\(", code))
-
+# Extract all prompts from input("...")
+def extract_prompts(code):
+    return re.findall(r'input\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)', code)
 
 def run_python(code, inputs):
     temp = f"temp_{uuid.uuid4().hex[:8]}.py"
@@ -41,8 +40,8 @@ def run_python(code, inputs):
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
         "👋 Welcome to Code Runner Bot!\n"
-        "Send me Python code and I will run it.\n"
-        "Supports input() too."
+        "Send Python code and I will run it.\n"
+        "Supports input() prompts."
     )
 
 
@@ -50,7 +49,7 @@ def handle_message(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     text = update.message.text
 
-    # Waiting for INPUTS
+    # WAITING FOR USER INPUTS
     if chat_id in sessions and sessions[chat_id]["awaiting"]:
         sessions[chat_id]["inputs"].append(text)
 
@@ -58,17 +57,16 @@ def handle_message(update: Update, context: CallbackContext):
             code = sessions[chat_id]["code"]
             output = run_python(code, sessions[chat_id]["inputs"])
             update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
-
             sessions.pop(chat_id)
         else:
-            update.message.reply_text(
-                f"Input {len(sessions[chat_id]['inputs'])+1}:"
-            )
+            next_prompt = sessions[chat_id]["prompts"][len(sessions[chat_id]["inputs"])]
+            update.message.reply_text(next_prompt)
         return
 
-    # New Code
+    # New code received
     code = text
-    need = count_inputs(code)
+    prompts = extract_prompts(code)
+    need = len(prompts)
 
     if need == 0:
         output = run_python(code, [])
@@ -79,12 +77,11 @@ def handle_message(update: Update, context: CallbackContext):
         "code": code,
         "inputs": [],
         "need": need,
+        "prompts": prompts,
         "awaiting": True
     }
 
-    update.message.reply_text(
-        f"Your code requires {need} inputs.\nSend Input 1:"
-    )
+    update.message.reply_text(prompts[0])
 
 
 def main():
